@@ -12,9 +12,7 @@ import {
   LineChart,
   ListFilter,
   Loader2,
-  Plus,
   Search,
-  Sparkles,
 } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import {
@@ -43,7 +41,7 @@ type SourceResult = {
     total: number;
     yearly: { year: number; count: number }[];
   }[];
-  status: 'ok' | 'partial' | 'mock';
+  status: 'ok' | 'partial';
   error?: string;
 };
 
@@ -82,12 +80,6 @@ type ContextResponse = {
 
 const currentYear = new Date().getFullYear();
 
-const examples = [
-  'AI, 人工知能, GPT, Anthropic, アンソロピック',
-  '脱炭素, カーボンニュートラル, GX',
-  '生成AI, 大規模言語モデル, LLM',
-];
-
 const sourceStyle: Record<
   SourceId,
   { color: string; icon: typeof BookOpen; short: string }
@@ -98,11 +90,9 @@ const sourceStyle: Record<
 
 export default function Home() {
   const [mode, setMode] = useState<SearchMode>('both');
-  const [groupName, setGroupName] = useState('AI関連語');
-  const [termsText, setTermsText] = useState(examples[0]);
-  const [fromYear, setFromYear] = useState(2000);
+  const [searchTerm, setSearchTerm] = useState('人工知能');
+  const [fromYear, setFromYear] = useState(currentYear - 1);
   const [toYear, setToYear] = useState(currentYear);
-  const [useMock, setUseMock] = useState(false);
   const [result, setResult] = useState<SearchResponse | null>(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
@@ -117,19 +107,6 @@ export default function Home() {
   );
   const [contextError, setContextError] = useState('');
   const [contextLoading, setContextLoading] = useState(false);
-
-  const terms = useMemo(
-    () =>
-      Array.from(
-        new Set(
-          termsText
-            .split(/[,、\n]/)
-            .map((term) => term.trim())
-            .filter(Boolean),
-        ),
-      ),
-    [termsText],
-  );
 
   const chartData = useMemo(() => {
     if (!result) return [];
@@ -165,16 +142,27 @@ export default function Home() {
     event.preventDefault();
     setError('');
 
-    if (terms.length === 0) {
-      setError('検索語を1つ以上入力してください。');
+    const term = searchTerm.trim();
+    if (!term) {
+      setError('検索語を入力してください。');
+      return;
+    }
+    if (term.includes(',') || term.includes('、') || /\s/.test(term)) {
+      setError('検索語は1語だけ入力してください。');
       return;
     }
     if (fromYear > toYear) {
       setError('開始年は終了年以前にしてください。');
       return;
     }
-    if (toYear - fromYear > 90) {
-      setError('トライアル版では一度の検索範囲を90年以内にしてください。');
+    const span = toYear - fromYear + 1;
+    const includesBibliography = mode === 'both' || mode === 'bibliography';
+    if (includesBibliography && span > 2) {
+      setError('NDL書誌を含む検索は2年以内にしてください。');
+      return;
+    }
+    if (!includesBibliography && span > 90) {
+      setError('国会議事録のみの検索は90年以内にしてください。');
       return;
     }
 
@@ -186,11 +174,10 @@ export default function Home() {
         body: JSON.stringify({
           mode,
           queryGroup: {
-            label: groupName.trim() || terms[0],
-            terms,
+            label: term,
+            terms: [term],
           },
           yearRange: { from: fromYear, to: toYear },
-          mock: useMock,
         }),
       });
       const data = (await response.json()) as
@@ -236,7 +223,6 @@ export default function Home() {
           terms: selectedTerms,
           year: contextYear,
           limit: contextLimit,
-          mock: useMock,
           filters: {
             excludeMetadata,
             dedupeMeeting,
@@ -277,7 +263,7 @@ export default function Home() {
               国会議事録・NDL書誌トレンド検索
             </h1>
             <p className="mt-2 max-w-3xl text-sm leading-6 text-[var(--muted-foreground)]">
-              単語または関連語グループを登録し、データ源ごとの初出年と年次件数を確認します。初期表示は2000年以降、将来は1948年以降へ拡張できる年範囲モデルです。
+              ひとつの検索語を入力し、データ源ごとの初出年と年次件数を確認します。NDL書誌は応答時間に配慮して短期間、国会議事録のみは長期範囲を扱えます。
             </p>
           </div>
           <div className="grid grid-cols-3 gap-2 rounded-md border border-[var(--border)] bg-white p-2 text-center">
@@ -319,42 +305,16 @@ export default function Home() {
             <SegmentedMode mode={mode} setMode={setMode} />
           </fieldset>
 
-          <label className="mt-5 block">
+          <label className="mt-4 block">
             <span className="text-xs font-semibold text-[var(--muted-foreground)]">
-              検索グループ名
+              検索語
             </span>
             <input
-              value={groupName}
-              onChange={(event) => setGroupName(event.target.value)}
+              value={searchTerm}
+              onChange={(event) => setSearchTerm(event.target.value)}
               className="mt-2 h-10 w-full rounded-md border border-[var(--border)] px-3 text-sm outline-none focus:border-[var(--primary)]"
             />
           </label>
-
-          <label className="mt-4 block">
-            <span className="text-xs font-semibold text-[var(--muted-foreground)]">
-              関連語・表記ゆれ
-            </span>
-            <textarea
-              value={termsText}
-              onChange={(event) => setTermsText(event.target.value)}
-              rows={5}
-              className="mt-2 w-full resize-none rounded-md border border-[var(--border)] px-3 py-2 text-sm leading-6 outline-none focus:border-[var(--primary)]"
-            />
-          </label>
-
-          <div className="mt-3 flex flex-wrap gap-2">
-            {examples.map((example) => (
-              <button
-                key={example}
-                type="button"
-                onClick={() => setTermsText(example)}
-                className="inline-flex items-center gap-1 rounded-md border border-[var(--border)] px-2.5 py-1.5 text-xs text-[var(--muted-foreground)] hover:border-[var(--primary)] hover:text-[var(--foreground)]"
-              >
-                <Plus className="h-3 w-3" />
-                例を入力
-              </button>
-            ))}
-          </div>
 
           <div className="mt-5 grid grid-cols-2 gap-3">
             <label>
@@ -385,24 +345,10 @@ export default function Home() {
             </label>
           </div>
 
-          <label className="mt-4 flex items-center justify-between rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm">
-            <span className="flex items-center gap-2">
-              <Sparkles className="h-4 w-4 text-[var(--accent-strong)]" />
-              APIの代わりにサンプル値で確認
-            </span>
-            <input
-              type="checkbox"
-              checked={useMock}
-              onChange={(event) => setUseMock(event.target.checked)}
-              className="h-4 w-4 accent-[var(--primary)]"
-            />
-          </label>
-
           <div className="mt-4 rounded-md bg-[var(--surface)] p-3 text-xs leading-5 text-[var(--muted-foreground)]">
-            <p>入力語数: {terms.length}語</p>
-            <p>
-              グループ合算を主系列にし、語ごとの内訳を同じ結果構造に保持します。
-            </p>
+            <p>検索語は1語のみです。</p>
+            <p>NDLを含む検索は最大2年、国会議事録のみは最大90年です。</p>
+            <p>取得できない場合はサンプル値に逃がさず、エラーを表示します。</p>
           </div>
           {error ? (
             <p className="mt-3 flex gap-2 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">
@@ -579,7 +525,7 @@ function ResultsOverview({
           検索すると結果が表示されます
         </h2>
         <p className="mt-2 max-w-2xl text-sm leading-6 text-[var(--muted-foreground)]">
-          複数語はひとつの検索グループとして合算され、比較モードでは同じグループを両データ源に適用します。
+          検索語1語を、選択したデータ源へ照会します。
         </p>
       </div>
     );
@@ -604,7 +550,7 @@ function ResultsOverview({
               </span>
               {source.status !== 'ok' ? (
                 <span className="rounded-md bg-amber-50 px-2 py-1 text-[11px] font-semibold text-amber-700">
-                  {source.status === 'mock' ? 'サンプル' : '一部失敗'}
+                  一部失敗
                 </span>
               ) : null}
             </div>
@@ -648,7 +594,7 @@ function TermBreakdown({ result }: { result: SearchResponse }) {
   return (
     <div className="rounded-lg border border-[var(--border)] bg-white p-4 shadow-sm">
       <div className="mb-4 flex items-center justify-between">
-        <h2 className="text-base font-semibold">語ごとの内訳</h2>
+        <h2 className="text-base font-semibold">集計内訳</h2>
         <span className="rounded-md bg-[var(--surface)] px-2.5 py-1 text-xs text-[var(--muted-foreground)]">
           {result.queryGroup.terms.length}語
         </span>
@@ -800,7 +746,7 @@ function ContextExplorer({
             onChange={(event) => setTerm(event.target.value)}
             className="mt-2 h-10 w-full rounded-md border border-[var(--border)] bg-white px-3 text-sm outline-none focus:border-[var(--primary)]"
           >
-            <option value="__group__">グループ全体</option>
+            <option value="__group__">検索語</option>
             {result.queryGroup.terms.map((value) => (
               <option key={value} value={value}>
                 {value}

@@ -13,7 +13,6 @@ type SearchRequest = {
     from?: number;
     to?: number;
   };
-  mock?: boolean;
 };
 
 type TermResult = {
@@ -23,6 +22,13 @@ type TermResult = {
   yearly: { year: number; count: number }[];
   errors: number;
 };
+
+type CachedCount = {
+  count: number;
+  expiresAt: number;
+};
+
+export const maxDuration = 60;
 
 const SOURCE_LABELS: Record<SourceId, { label: string; unit: string }> = {
   bibliography: {
@@ -53,17 +59,22 @@ const officialSources = [
 const notes = [
   'NDLサーチはSRU APIを使用し、title="語" と出版年の from/until で年別件数を取得します。',
   '国会会議録は speech APIを使用し、any=語 と会議開催日の from/until で年別件数を取得します。',
-  '外部APIへのアクセスは多重化せず、トライアル版では語数・年数を抑えた逐次集計にしています。',
+  '外部APIへのアクセスは多重化せず、1語ずつ年別に逐次集計します。取得結果はサーバー側で一定期間キャッシュします。',
+  'NDLサーチは年によって応答に20秒以上かかることがあるため、NDLを含む検索は短い年範囲に制限しています。',
   'NDLサーチは利用目的・データ提供機関により申請や許諾が必要な場合があります。継続利用時は公式の利用申請フォーム確認が必要です。',
   '国会会議録APIは手続き不要と案内されていますが、短時間の大量アクセスは避ける必要があります。',
 ];
+
+const countCache = new Map<string, CachedCount>();
+const pendingCountRequests = new Map<string, Promise<number>>();
+const COUNT_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 export async function POST(request: Request) {
   try {
     const body = (await request.json()) as SearchRequest;
     const mode = body.mode ?? 'both';
     const terms = normalizeTerms(body.queryGroup?.terms ?? []);
-    const label = body.queryGroup?.label?.trim() || terms[0] || '検索グループ';
+    const label = terms[0] || '検索語';
     const from = Number(body.yearRange?.from ?? 2000);
     const to = Number(body.yearRange?.to ?? new Date().getFullYear());
 
@@ -75,14 +86,14 @@ export async function POST(request: Request) {
     }
     if (terms.length === 0) {
       return NextResponse.json(
-        { error: '検索語を1つ以上入力してください。' },
+        { error: '検索語を入力してください。' },
         { status: 400 },
       );
     }
-    if (terms.length > 8) {
+    if (terms.length !== 1) {
       return NextResponse.json(
         {
-          error: 'トライアル版では検索グループ内の語を8語以内にしてください。',
+          error: '検索語は1語だけ指定してください。',
         },
         { status: 400 },
       );
@@ -98,9 +109,23 @@ export async function POST(request: Request) {
         { status: 400 },
       );
     }
-    if (to - from > 90) {
+    const includesBibliography = mode === 'both' || mode === 'bibliography';
+    const yearSpan = to - from + 1;
+    if (includesBibliography && yearSpan > 2) {
       return NextResponse.json(
-        { error: 'トライアル版では一度の検索範囲を90年以内にしてください。' },
+        {
+          error:
+            'NDL書誌を含む検索は、API負荷と応答時間を考慮して2年以内にしてください。',
+        },
+        { status: 400 },
+      );
+    }
+    if (!includesBibliography && yearSpan > 90) {
+      return NextResponse.json(
+        {
+          error:
+            '国会議事録のみの検索は、一度の検索範囲を90年以内にしてください。',
+        },
         { status: 400 },
       );
     }
@@ -110,9 +135,7 @@ export async function POST(request: Request) {
 
     const sources = [];
     for (const source of selectedSources) {
-      const termsResult = body.mock
-        ? buildMockTermResults(source, terms, from, to)
-        : await buildTermResults(source, terms, from, to);
+      const termsResult = await buildTermResults(source, terms, from, to);
       const yearly = aggregateYearly(termsResult, from, to);
       const total = yearly.reduce((sum, item) => sum + item.count, 0);
       const firstYear = yearly.find((item) => item.count > 0)?.year ?? null;
@@ -132,7 +155,7 @@ export async function POST(request: Request) {
           ...term,
           total: Math.max(0, term.total),
         })),
-        status: body.mock ? 'mock' : failedYears > 0 ? 'partial' : 'ok',
+        status: failedYears > 0 ? 'partial' : 'ok',
         error:
           failedYears > 0
             ? `${failedYears}件の年別リクエストで取得に失敗しました。時間を置いて再検索してください。`
@@ -182,19 +205,13 @@ async function buildTermResults(
   const results: TermResult[] = [];
   for (const term of terms) {
     const yearly = [];
-    let errors = 0;
     for (let year = from; year <= to; year += 1) {
-      try {
-        const count =
-          source === 'bibliography'
-            ? await fetchBibliographyCount(term, year)
-            : await fetchProceedingsCount(term, year);
-        yearly.push({ year, count });
-      } catch {
-        errors += 1;
-        yearly.push({ year, count: 0 });
-      }
-      await sleep(120);
+      const count =
+        source === 'bibliography'
+          ? await fetchBibliographyCount(term, year)
+          : await fetchProceedingsCount(term, year);
+      yearly.push({ year, count });
+      await sleep(source === 'bibliography' ? 600 : 150);
     }
     const total = yearly.reduce((sum, item) => sum + item.count, 0);
     results.push({
@@ -202,52 +219,106 @@ async function buildTermResults(
       firstYear: yearly.find((item) => item.count > 0)?.year ?? null,
       total,
       yearly,
-      errors,
+      errors: 0,
     });
   }
   return results;
 }
 
 async function fetchBibliographyCount(term: string, year: number) {
-  const query = `title="${escapeCql(term)}" AND from="${year}" AND until="${year}"`;
-  const params = new URLSearchParams({
-    operation: 'searchRetrieve',
-    maximumRecords: '1',
-    recordPacking: 'xml',
-    mediatype: 'books',
-    query,
+  return cachedCount('bibliography', term, year, async () => {
+    const query = `title="${escapeCql(term)}" AND from="${year}" AND until="${year}"`;
+    const params = new URLSearchParams({
+      operation: 'searchRetrieve',
+      maximumRecords: '1',
+      recordPacking: 'xml',
+      mediatype: 'books',
+      query,
+    });
+    const response = await fetchWithTimeout(
+      `https://ndlsearch.ndl.go.jp/api/sru?${params}`,
+      {
+        headers: { Accept: 'application/xml,text/xml' },
+        cache: 'force-cache',
+        next: { revalidate: 7 * 24 * 60 * 60 },
+      },
+      35_000,
+    );
+    if (!response.ok) {
+      throw new Error(`NDL Search API returned ${response.status}`);
+    }
+    return extractXmlNumber(await response.text(), 'numberOfRecords');
   });
-  const response = await fetch(
-    `https://ndlsearch.ndl.go.jp/api/sru?${params}`,
-    {
-      headers: { Accept: 'application/xml,text/xml' },
-    },
-  );
-  if (!response.ok) {
-    throw new Error(`NDL Search API returned ${response.status}`);
-  }
-  return extractXmlNumber(await response.text(), 'numberOfRecords');
 }
 
 async function fetchProceedingsCount(term: string, year: number) {
-  const params = new URLSearchParams({
-    any: term,
-    from: `${year}-01-01`,
-    until: `${year}-12-31`,
-    maximumRecords: '1',
-    recordPacking: 'json',
+  return cachedCount('proceedings', term, year, async () => {
+    const params = new URLSearchParams({
+      any: term,
+      from: `${year}-01-01`,
+      until: `${year}-12-31`,
+      maximumRecords: '1',
+      recordPacking: 'json',
+    });
+    const response = await fetchWithTimeout(
+      `https://kokkai.ndl.go.jp/api/speech?${params}`,
+      {
+        headers: { Accept: 'application/json' },
+        cache: 'force-cache',
+        next: { revalidate: 7 * 24 * 60 * 60 },
+      },
+      10_000,
+    );
+    if (!response.ok) {
+      throw new Error(`Kokkai API returned ${response.status}`);
+    }
+    const data = (await response.json()) as { numberOfRecords?: number };
+    return Number(data.numberOfRecords ?? 0);
   });
-  const response = await fetch(
-    `https://kokkai.ndl.go.jp/api/speech?${params}`,
-    {
-      headers: { Accept: 'application/json' },
-    },
-  );
-  if (!response.ok) {
-    throw new Error(`Kokkai API returned ${response.status}`);
+}
+
+async function cachedCount(
+  source: SourceId,
+  term: string,
+  year: number,
+  fetcher: () => Promise<number>,
+) {
+  const key = `${source}:${term}:${year}`;
+  const now = Date.now();
+  const cached = countCache.get(key);
+  if (cached && cached.expiresAt > now) return cached.count;
+
+  const pending = pendingCountRequests.get(key);
+  if (pending) return pending;
+
+  const request = fetcher().then((count) => {
+    countCache.set(key, { count, expiresAt: now + COUNT_CACHE_TTL_MS });
+    pendingCountRequests.delete(key);
+    return count;
+  });
+  pendingCountRequests.set(key, request);
+  return request;
+}
+
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit & { next?: { revalidate: number } },
+  timeoutMs: number,
+) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error(
+        `API応答が${Math.round(timeoutMs / 1000)}秒を超えたため中断しました。`,
+      );
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
   }
-  const data = (await response.json()) as { numberOfRecords?: number };
-  return Number(data.numberOfRecords ?? 0);
 }
 
 function extractXmlNumber(xml: string, tagName: string) {
@@ -276,49 +347,4 @@ function escapeCql(term: string) {
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function buildMockTermResults(
-  source: SourceId,
-  terms: string[],
-  from: number,
-  to: number,
-): TermResult[] {
-  return terms.map((term, index) => {
-    const first = Math.min(
-      to,
-      Math.max(from, 2000 + ((hash(`${source}-${term}`) + index * 3) % 18)),
-    );
-    const yearly = [];
-    for (let year = from; year <= to; year += 1) {
-      const active = year >= first;
-      const growth = active ? Math.max(0, year - first + 1) : 0;
-      const wave = Math.abs(Math.sin((year + hash(term)) / 2.8));
-      const sourceScale = source === 'bibliography' ? 3 : 8;
-      yearly.push({
-        year,
-        count: active
-          ? Math.round(
-              (growth * sourceScale + wave * 18 + index * 4) / (index + 1),
-            )
-          : 0,
-      });
-    }
-    const total = yearly.reduce((sum, item) => sum + item.count, 0);
-    return {
-      term,
-      firstYear: yearly.find((item) => item.count > 0)?.year ?? null,
-      total,
-      yearly,
-      errors: 0,
-    };
-  });
-}
-
-function hash(value: string) {
-  let h = 0;
-  for (let index = 0; index < value.length; index += 1) {
-    h = (h * 31 + value.charCodeAt(index)) >>> 0;
-  }
-  return h;
 }

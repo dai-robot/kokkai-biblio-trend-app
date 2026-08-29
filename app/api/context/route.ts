@@ -7,13 +7,14 @@ type ContextRequest = {
   terms?: string[];
   year?: number;
   limit?: number;
-  mock?: boolean;
   filters?: {
     excludeMetadata?: boolean;
     dedupeMeeting?: boolean;
     minSpeechLength?: number;
   };
 };
+
+export const maxDuration = 60;
 
 type ContextItem = {
   id: string;
@@ -42,9 +43,9 @@ export async function POST(request: Request) {
         { status: 400 },
       );
     }
-    if (terms.length === 0 || terms.length > 8) {
+    if (terms.length !== 1) {
       return NextResponse.json(
-        { error: '文脈取得では1から8語を指定してください。' },
+        { error: '文脈取得では検索語を1語だけ指定してください。' },
         { status: 400 },
       );
     }
@@ -59,9 +60,8 @@ export async function POST(request: Request) {
       );
     }
 
-    const items = body.mock
-      ? buildMockContext(source, terms, year, limit)
-      : source === 'proceedings'
+    const items =
+      source === 'proceedings'
         ? await fetchProceedingContext(terms, year, limit, body.filters)
         : await fetchBibliographyContext(terms, year, limit);
 
@@ -110,11 +110,14 @@ async function fetchProceedingContext(
       maximumRecords: String(perTermLimit),
       recordPacking: 'json',
     });
-    const response = await fetch(
+    const response = await fetchWithTimeout(
       `https://kokkai.ndl.go.jp/api/speech?${params}`,
       {
         headers: { Accept: 'application/json' },
+        cache: 'force-cache',
+        next: { revalidate: 7 * 24 * 60 * 60 },
       },
+      10_000,
     );
     if (!response.ok) {
       throw new Error(`国会会議録APIが ${response.status} を返しました。`);
@@ -209,11 +212,14 @@ async function fetchBibliographyContext(
       mediatype: 'books',
       query,
     });
-    const response = await fetch(
+    const response = await fetchWithTimeout(
       `https://ndlsearch.ndl.go.jp/api/sru?${params}`,
       {
         headers: { Accept: 'application/xml,text/xml' },
+        cache: 'force-cache',
+        next: { revalidate: 7 * 24 * 60 * 60 },
       },
+      35_000,
     );
     if (!response.ok) {
       throw new Error(`NDLサーチAPIが ${response.status} を返しました。`);
@@ -334,37 +340,23 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function buildMockContext(
-  source: SourceId,
-  terms: string[],
-  year: number,
-  limit: number,
-): ContextItem[] {
-  const items: ContextItem[] = [];
-  for (const term of terms) {
-    for (let index = 0; index < limit; index += 1) {
-      if (items.length >= limit) return items;
-      items.push({
-        id: `${source}-${term}-${year}-${index}`,
-        source,
-        term,
-        year,
-        date: `${year}-${String((index % 12) + 1).padStart(2, '0')}-15`,
-        title:
-          source === 'proceedings'
-            ? `衆議院 ${index % 2 === 0 ? '予算委員会' : '内閣委員会'}`
-            : `${term}をめぐる社会変化 ${index + 1}`,
-        subtitle:
-          source === 'proceedings'
-            ? `${year}年 / 発言者サンプル`
-            : `著者サンプル / 出版者サンプル / ${year}年`,
-        speaker: source === 'proceedings' ? '発言者サンプル' : undefined,
-        snippet:
-          source === 'proceedings'
-            ? `${term}について、制度設計、産業政策、教育現場への影響を踏まえた議論が行われています。`
-            : `タイトルまたは書誌情報の中で「${term}」が確認できる書誌レコードのサンプルです。`,
-      });
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit & { next?: { revalidate: number } },
+  timeoutMs: number,
+) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error(
+        `API応答が${Math.round(timeoutMs / 1000)}秒を超えたため中断しました。`,
+      );
     }
+    throw error;
+  } finally {
+    clearTimeout(timer);
   }
-  return items;
 }
