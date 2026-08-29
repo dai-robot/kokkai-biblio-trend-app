@@ -29,11 +29,6 @@ type ContextItem = {
   url?: string;
 };
 
-type RelatedTerm = {
-  term: string;
-  count: number;
-};
-
 export async function POST(request: Request) {
   try {
     const body = (await request.json()) as ContextRequest;
@@ -77,13 +72,9 @@ export async function POST(request: Request) {
       limit,
       count: items.length,
       items,
-      relatedTerms:
-        source === 'proceedings'
-          ? extractRelatedTerms(items, terms[0])
-          : ([] satisfies RelatedTerm[]),
       note:
         source === 'proceedings'
-          ? '年・語で候補を少量取得し、会議録情報除外、短文除外、同一会議の重複抑制を適用しています。関連語は表示した代表発言内の簡易集計です。'
+          ? '年・語で候補を少量取得し、会議録情報除外、短文除外、同一会議の重複抑制を適用しています。'
           : '年・語で候補を少量取得し、タイトル・著者・出版者・出版年を文脈として表示しています。',
     });
   } catch (error) {
@@ -347,53 +338,6 @@ function clamp(value: number, min: number, max: number) {
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function extractRelatedTerms(items: ContextItem[], searchTerm: string) {
-  const stopwords = new Set([
-    searchTerm.toLocaleLowerCase('ja-JP'),
-    'これ',
-    'それ',
-    'ため',
-    'こと',
-    'もの',
-    'よう',
-    'これら',
-    'について',
-    'として',
-    'そして',
-    'また',
-    'この',
-    'その',
-    'ます',
-    'です',
-    'する',
-    'した',
-    'ある',
-    'いる',
-    'ない',
-    '政府',
-    '委員',
-    '大臣',
-    '国会',
-  ]);
-  const counts = new Map<string, number>();
-  const tokenPattern =
-    /[A-Za-z][A-Za-z0-9+#.-]{1,}|[一-龠々〆ヵヶ]{2,}|[ァ-ヶー]{2,}|[ぁ-ん]{3,}/g;
-
-  for (const item of items) {
-    const tokens = item.snippet.match(tokenPattern) ?? [];
-    for (const token of tokens) {
-      const normalized = token.toLocaleLowerCase('ja-JP');
-      if (stopwords.has(normalized)) continue;
-      counts.set(token, (counts.get(token) ?? 0) + 1);
-    }
-  }
-
-  return Array.from(counts.entries())
-    .map(([term, count]) => ({ term, count }))
-    .sort((a, b) => b.count - a.count || a.term.localeCompare(b.term, 'ja-JP'))
-    .slice(0, 10);
 }
 
 async function fetchWithTimeout(

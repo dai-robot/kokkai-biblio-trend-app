@@ -19,7 +19,6 @@ import {
   CartesianGrid,
   Line,
   LineChart as RechartsLineChart,
-  ReferenceDot,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -76,19 +75,7 @@ type ContextResponse = {
   limit: number;
   count: number;
   items: ContextItem[];
-  relatedTerms?: { term: string; count: number }[];
   note: string;
-};
-
-type GrowthPoint = {
-  source: SourceId;
-  sourceLabel: string;
-  year: number;
-  count: number;
-  previousCount: number;
-  delta: number;
-  growthRate: number;
-  isSpike: boolean;
 };
 
 const currentYear = new Date().getFullYear();
@@ -114,7 +101,7 @@ export default function Home() {
   const [contextSource, setContextSource] = useState<SourceId>('proceedings');
   const [contextTerm, setContextTerm] = useState('__group__');
   const [contextYear, setContextYear] = useState(currentYear);
-  const [contextLimit, setContextLimit] = useState(5);
+  const [contextLimit, setContextLimit] = useState(10);
   const [excludeMetadata, setExcludeMetadata] = useState(true);
   const [dedupeMeeting, setDedupeMeeting] = useState(true);
   const [contextResult, setContextResult] = useState<ContextResponse | null>(
@@ -122,7 +109,6 @@ export default function Home() {
   );
   const [contextError, setContextError] = useState('');
   const [contextLoading, setContextLoading] = useState(false);
-  const [minPreviousCount, setMinPreviousCount] = useState(5);
 
   const chartData = useMemo(() => {
     if (!result) return [];
@@ -153,26 +139,6 @@ export default function Home() {
       ? `${a.label}が${b.firstYear - a.firstYear}年先行`
       : `${b.label}が${a.firstYear - b.firstYear}年先行`;
   }, [result]);
-
-  const growthPoints = useMemo(() => {
-    if (!result) return [];
-    return result.sources.flatMap((source) =>
-      buildGrowthPoints(source, minPreviousCount),
-    );
-  }, [result, minPreviousCount]);
-
-  const spikeYears = useMemo(
-    () =>
-      growthPoints
-        .filter((point) => point.isSpike)
-        .sort(
-          (a, b) =>
-            b.growthRate - a.growthRate ||
-            b.delta - a.delta ||
-            a.year - b.year,
-        ),
-    [growthPoints],
-  );
 
   async function runSearch(event: { preventDefault: () => void }) {
     event.preventDefault();
@@ -245,41 +211,8 @@ export default function Home() {
 
   async function runContextSearch() {
     if (!result) return;
-    await runContextLookup({
-      source: contextSource,
-      terms: contextTerm === '__group__' ? result.queryGroup.terms : [contextTerm],
-      year: contextYear,
-      limit: contextLimit,
-    });
-  }
-
-  async function runRepresentativeSpeeches(year: number) {
-    if (!result) return;
-    setContextSource('proceedings');
-    setContextTerm('__group__');
-    setContextYear(year);
-    setContextLimit(5);
-    await runContextLookup({
-      source: 'proceedings',
-      terms: result.queryGroup.terms,
-      year,
-      limit: 5,
-    });
-  }
-
-  async function runContextLookup({
-    source,
-    terms,
-    year,
-    limit,
-  }: {
-    source: SourceId;
-    terms: string[];
-    year: number;
-    limit: number;
-  }) {
     const selectedTerms =
-      terms.length > 0 ? terms : (result?.queryGroup.terms ?? []);
+      contextTerm === '__group__' ? result.queryGroup.terms : [contextTerm];
 
     setContextLoading(true);
     setContextError('');
@@ -288,10 +221,10 @@ export default function Home() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          source,
+          source: contextSource,
           terms: selectedTerms,
-          year,
-          limit,
+          year: contextYear,
+          limit: contextLimit,
           filters: {
             excludeMetadata,
             dedupeMeeting,
@@ -476,19 +409,6 @@ export default function Home() {
                         activeDot={{ r: 5 }}
                       />
                     ))}
-                    {growthPoints
-                      .filter((point) => point.isSpike)
-                      .map((point) => (
-                        <ReferenceDot
-                          key={`${point.source}-${point.year}`}
-                          x={point.year}
-                          y={point.count}
-                          r={5}
-                          fill={sourceStyle[point.source].color}
-                          stroke="#ffffff"
-                          strokeWidth={2}
-                        />
-                      ))}
                   </RechartsLineChart>
                 </ResponsiveContainer>
               ) : (
@@ -498,18 +418,6 @@ export default function Home() {
           </div>
 
           {result ? <TermBreakdown result={result} /> : null}
-          {result ? (
-            <GrowthExplorer
-              growthPoints={growthPoints}
-              spikeYears={spikeYears}
-              minPreviousCount={minPreviousCount}
-              setMinPreviousCount={setMinPreviousCount}
-              hasProceedings={result.sources.some(
-                (source) => source.source === 'proceedings',
-              )}
-              onSelectRepresentativeYear={runRepresentativeSpeeches}
-            />
-          ) : null}
           {result ? (
             <ContextExplorer
               result={result}
@@ -742,134 +650,6 @@ function TermBreakdown({ result }: { result: SearchResponse }) {
   );
 }
 
-function GrowthExplorer({
-  growthPoints,
-  spikeYears,
-  minPreviousCount,
-  setMinPreviousCount,
-  hasProceedings,
-  onSelectRepresentativeYear,
-}: {
-  growthPoints: GrowthPoint[];
-  spikeYears: GrowthPoint[];
-  minPreviousCount: number;
-  setMinPreviousCount: (value: number) => void;
-  hasProceedings: boolean;
-  onSelectRepresentativeYear: (year: number) => void;
-}) {
-  return (
-    <div className="rounded-lg border border-[var(--border)] bg-white p-4 shadow-sm">
-      <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h2 className="text-base font-semibold">急増年</h2>
-          <p className="mt-1 text-xs leading-5 text-[var(--muted-foreground)]">
-            前年比は「今年の件数 / 前年の件数」で計算します。前年件数がしきい値未満の年はノイズとして急増判定から外します。
-          </p>
-        </div>
-        <label className="min-w-36 text-xs font-semibold text-[var(--muted-foreground)]">
-          最低件数しきい値
-          <input
-            type="number"
-            min={1}
-            max={999}
-            value={minPreviousCount}
-            onChange={(event) =>
-              setMinPreviousCount(Math.max(1, Number(event.target.value) || 1))
-            }
-            className="mt-2 h-9 w-full rounded-md border border-[var(--border)] px-3 text-sm outline-none focus:border-[var(--primary)]"
-          />
-        </label>
-      </div>
-
-      {spikeYears.length > 0 ? (
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {spikeYears.slice(0, 6).map((point) => (
-            <button
-              key={`${point.source}-${point.year}`}
-              type="button"
-              onClick={() => {
-                if (hasProceedings) onSelectRepresentativeYear(point.year);
-              }}
-              className="rounded-md border border-[var(--border)] bg-[var(--surface)] p-3 text-left transition hover:border-[var(--primary)] disabled:cursor-not-allowed disabled:opacity-60"
-              disabled={!hasProceedings}
-            >
-              <div className="flex items-center justify-between gap-3">
-                <span className="text-sm font-semibold">
-                  {point.year}年 / {point.sourceLabel}
-                </span>
-                <span className="rounded-md bg-white px-2 py-1 text-xs font-semibold text-[var(--accent-strong)]">
-                  前年比 {point.growthRate.toFixed(1)}倍
-                </span>
-              </div>
-              <p className="mt-2 text-xs leading-5 text-[var(--muted-foreground)]">
-                前年 {point.previousCount.toLocaleString('ja-JP')}件 → 当年{' '}
-                {point.count.toLocaleString('ja-JP')}件、前年差 +{point.delta.toLocaleString('ja-JP')}件
-              </p>
-              <p className="mt-2 text-xs font-semibold text-[var(--foreground)]">
-                {hasProceedings
-                  ? 'クリックで代表発言を表示'
-                  : '代表発言は国会議事録を含む検索で表示できます'}
-              </p>
-            </button>
-          ))}
-        </div>
-      ) : (
-        <div className="rounded-md border border-dashed border-[var(--border)] p-4 text-sm text-[var(--muted-foreground)]">
-          この条件では急増年は見つかりませんでした。年範囲を広げるか、最低件数しきい値を下げてください。
-        </div>
-      )}
-
-      {growthPoints.length > 0 ? (
-        <div className="mt-4 overflow-x-auto">
-          <table className="w-full min-w-[720px] border-collapse text-sm">
-            <thead>
-              <tr className="border-b border-[var(--border)] text-left text-xs text-[var(--muted-foreground)]">
-                <th className="py-2 pr-3 font-semibold">年</th>
-                <th className="py-2 pr-3 font-semibold">データ源</th>
-                <th className="py-2 pr-3 text-right font-semibold">前年件数</th>
-                <th className="py-2 pr-3 text-right font-semibold">当年件数</th>
-                <th className="py-2 pr-3 text-right font-semibold">前年比</th>
-                <th className="py-2 font-semibold">判定</th>
-              </tr>
-            </thead>
-            <tbody>
-              {growthPoints.map((point) => (
-                <tr
-                  key={`${point.source}-${point.year}-row`}
-                  className="border-b border-[var(--border)]"
-                >
-                  <td className="py-2 pr-3 font-medium">{point.year}</td>
-                  <td className="py-2 pr-3">{point.sourceLabel}</td>
-                  <td className="py-2 pr-3 text-right">
-                    {point.previousCount.toLocaleString('ja-JP')}
-                  </td>
-                  <td className="py-2 pr-3 text-right">
-                    {point.count.toLocaleString('ja-JP')}
-                  </td>
-                  <td className="py-2 pr-3 text-right">
-                    {point.growthRate.toFixed(2)}倍
-                  </td>
-                  <td className="py-2">
-                    {point.isSpike ? (
-                      <span className="rounded-md bg-amber-50 px-2 py-1 text-xs font-semibold text-amber-700">
-                        急増年
-                      </span>
-                    ) : (
-                      <span className="text-xs text-[var(--muted-foreground)]">
-                        通常
-                      </span>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
 function ContextExplorer({
   result,
   source,
@@ -921,10 +701,10 @@ function ContextExplorer({
         <div>
           <h2 className="flex items-center gap-2 text-base font-semibold">
             <ListFilter className="h-4 w-4" />
-            代表発言・文脈サンプル
+            文脈サンプル
           </h2>
           <p className="mt-1 text-xs leading-5 text-[var(--muted-foreground)]">
-            急増年または任意の年を選び、代表発言や書誌例を3〜5件から確認します。
+            集計後に年・語・データ源を絞って、少量の発言例または書誌例だけを取得します。
           </p>
         </div>
         <button
@@ -1001,7 +781,7 @@ function ContextExplorer({
             onChange={(event) => setLimit(Number(event.target.value))}
             className="mt-2 h-10 w-full rounded-md border border-[var(--border)] bg-white px-3 text-sm outline-none focus:border-[var(--primary)]"
           >
-            {[3, 5].map((value) => (
+            {[5, 10, 15, 20].map((value) => (
               <option key={value} value={value}>
                 {value}
               </option>
@@ -1054,9 +834,7 @@ function ContextExplorer({
         <div className="mt-4">
           <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
             <p className="text-sm font-semibold">
-              {contextResult.year}年 /{' '}
-              {contextResult.source === 'proceedings' ? '代表発言' : '書誌例'}{' '}
-              {contextResult.count}件表示
+              {contextResult.year}年 / {contextResult.count}件表示
             </p>
             <p className="text-xs text-[var(--muted-foreground)]">
               {contextResult.note}
@@ -1073,24 +851,6 @@ function ContextExplorer({
               </div>
             )}
           </div>
-          {contextResult.relatedTerms &&
-          contextResult.relatedTerms.length > 0 ? (
-            <div className="mt-4 rounded-md bg-[var(--surface)] p-3">
-              <p className="text-xs font-semibold text-[var(--muted-foreground)]">
-                共起しやすい関連語
-              </p>
-              <div className="mt-2 flex flex-wrap gap-2">
-                {contextResult.relatedTerms.map((item) => (
-                  <span
-                    key={item.term}
-                    className="rounded-md bg-white px-2.5 py-1 text-xs font-semibold text-[var(--foreground)] ring-1 ring-[var(--border)]"
-                  >
-                    {item.term} ({item.count})
-                  </span>
-                ))}
-              </div>
-            </div>
-          ) : null}
         </div>
       ) : null}
     </div>
@@ -1124,7 +884,7 @@ function ContextCard({ item }: { item: ContextItem }) {
             className="inline-flex h-8 items-center gap-1 rounded-md border border-[var(--border)] px-2.5 text-xs font-semibold text-[var(--foreground)]"
           >
             <ExternalLink className="h-3.5 w-3.5" />
-            {item.source === 'proceedings' ? '本文リンク' : '原文'}
+            原文
           </a>
         ) : null}
       </div>
@@ -1171,30 +931,4 @@ function getPeakYear(source: SourceResult | undefined, fallback: number) {
     { year: fallback, count: -1 },
   );
   return peak.count > 0 ? peak.year : (source.firstYear ?? fallback);
-}
-
-function buildGrowthPoints(source: SourceResult, minPreviousCount: number) {
-  const points: GrowthPoint[] = [];
-  for (let index = 1; index < source.yearly.length; index += 1) {
-    const previous = source.yearly[index - 1];
-    const current = source.yearly[index];
-    const previousCount = previous?.count ?? 0;
-    const count = current?.count ?? 0;
-    if (!current || previousCount <= 0) continue;
-    const growthRate = count / previousCount;
-    const delta = count - previousCount;
-    points.push({
-      source: source.source,
-      sourceLabel:
-        source.source === 'bibliography' ? 'NDL書誌' : '国会議事録',
-      year: current.year,
-      count,
-      previousCount,
-      delta,
-      growthRate,
-      isSpike:
-        previousCount >= minPreviousCount && delta > 0 && growthRate >= 1.5,
-    });
-  }
-  return points;
 }
