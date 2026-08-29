@@ -79,6 +79,8 @@ type ContextResponse = {
 };
 
 const currentYear = new Date().getFullYear();
+const MAX_BIBLIOGRAPHY_YEARS = 5;
+const MAX_PROCEEDINGS_YEARS = 90;
 
 const sourceStyle: Record<
   SourceId,
@@ -157,12 +159,12 @@ export default function Home() {
     }
     const span = toYear - fromYear + 1;
     const includesBibliography = mode === 'both' || mode === 'bibliography';
-    if (includesBibliography && span > 2) {
-      setError('NDL書誌を含む検索は2年以内にしてください。');
+    if (includesBibliography && span > MAX_BIBLIOGRAPHY_YEARS) {
+      setError(`NDL書誌を含む検索は${MAX_BIBLIOGRAPHY_YEARS}年以内にしてください。`);
       return;
     }
-    if (!includesBibliography && span > 90) {
-      setError('国会議事録のみの検索は90年以内にしてください。');
+    if (!includesBibliography && span > MAX_PROCEEDINGS_YEARS) {
+      setError(`国会議事録のみの検索は${MAX_PROCEEDINGS_YEARS}年以内にしてください。`);
       return;
     }
 
@@ -268,7 +270,7 @@ export default function Home() {
           </div>
           <div className="grid grid-cols-3 gap-2 rounded-md border border-[var(--border)] bg-white p-2 text-center">
             <Metric label="対象" value="2 API" />
-            <Metric label="初期範囲" value="2000+" />
+            <Metric label="書誌範囲" value="最大5年" />
             <Metric label="単位" value="件数" />
           </div>
         </div>
@@ -347,7 +349,7 @@ export default function Home() {
 
           <div className="mt-4 rounded-md bg-[var(--surface)] p-3 text-xs leading-5 text-[var(--muted-foreground)]">
             <p>検索語は1語のみです。</p>
-            <p>NDLを含む検索は最大2年、国会議事録のみは最大90年です。</p>
+            <p>NDLを含む検索は最大5年、国会議事録のみは最大90年です。</p>
             <p>取得できない場合はサンプル値に逃がさず、エラーを表示します。</p>
           </div>
           {error ? (

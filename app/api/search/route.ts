@@ -30,6 +30,9 @@ type CachedCount = {
 
 export const maxDuration = 60;
 
+const MAX_BIBLIOGRAPHY_YEARS = 5;
+const MAX_PROCEEDINGS_YEARS = 90;
+
 const SOURCE_LABELS: Record<SourceId, { label: string; unit: string }> = {
   bibliography: {
     label: '国立国会図書館の書誌データ',
@@ -60,7 +63,7 @@ const notes = [
   'NDLサーチはSRU APIを使用し、title="語" と出版年の from/until で年別件数を取得します。',
   '国会会議録は speech APIを使用し、any=語 と会議開催日の from/until で年別件数を取得します。',
   '外部APIへのアクセスは多重化せず、1語ずつ年別に逐次集計します。取得結果はサーバー側で一定期間キャッシュします。',
-  'NDLサーチは年によって応答に20秒以上かかることがあるため、NDLを含む検索は短い年範囲に制限しています。',
+  'NDLサーチは年によって応答時間が大きく変動するため、NDLを含む検索は5年以内に制限しています。',
   'NDLサーチは利用目的・データ提供機関により申請や許諾が必要な場合があります。継続利用時は公式の利用申請フォーム確認が必要です。',
   '国会会議録APIは手続き不要と案内されていますが、短時間の大量アクセスは避ける必要があります。',
 ];
@@ -111,20 +114,20 @@ export async function POST(request: Request) {
     }
     const includesBibliography = mode === 'both' || mode === 'bibliography';
     const yearSpan = to - from + 1;
-    if (includesBibliography && yearSpan > 2) {
+    if (includesBibliography && yearSpan > MAX_BIBLIOGRAPHY_YEARS) {
       return NextResponse.json(
         {
           error:
-            'NDL書誌を含む検索は、API負荷と応答時間を考慮して2年以内にしてください。',
+            `NDL書誌を含む検索は、API負荷と応答時間を考慮して${MAX_BIBLIOGRAPHY_YEARS}年以内にしてください。`,
         },
         { status: 400 },
       );
     }
-    if (!includesBibliography && yearSpan > 90) {
+    if (!includesBibliography && yearSpan > MAX_PROCEEDINGS_YEARS) {
       return NextResponse.json(
         {
           error:
-            '国会議事録のみの検索は、一度の検索範囲を90年以内にしてください。',
+            `国会議事録のみの検索は、一度の検索範囲を${MAX_PROCEEDINGS_YEARS}年以内にしてください。`,
         },
         { status: 400 },
       );
@@ -211,7 +214,7 @@ async function buildTermResults(
           ? await fetchBibliographyCount(term, year)
           : await fetchProceedingsCount(term, year);
       yearly.push({ year, count });
-      await sleep(source === 'bibliography' ? 600 : 150);
+      await sleep(source === 'bibliography' ? 1_000 : 150);
     }
     const total = yearly.reduce((sum, item) => sum + item.count, 0);
     results.push({
@@ -244,6 +247,9 @@ async function fetchBibliographyCount(term: string, year: number) {
       },
       35_000,
     );
+    if (response.status === 429) {
+      throw new Error('NDLサーチAPIが429を返しました。時間を置いて再検索してください。');
+    }
     if (!response.ok) {
       throw new Error(`NDL Search API returned ${response.status}`);
     }
@@ -269,6 +275,9 @@ async function fetchProceedingsCount(term: string, year: number) {
       },
       10_000,
     );
+    if (response.status === 429) {
+      throw new Error('国会会議録APIが429を返しました。時間を置いて再検索してください。');
+    }
     if (!response.ok) {
       throw new Error(`Kokkai API returned ${response.status}`);
     }
@@ -291,11 +300,14 @@ async function cachedCount(
   const pending = pendingCountRequests.get(key);
   if (pending) return pending;
 
-  const request = fetcher().then((count) => {
-    countCache.set(key, { count, expiresAt: now + COUNT_CACHE_TTL_MS });
-    pendingCountRequests.delete(key);
-    return count;
-  });
+  const request = fetcher()
+    .then((count) => {
+      countCache.set(key, { count, expiresAt: now + COUNT_CACHE_TTL_MS });
+      return count;
+    })
+    .finally(() => {
+      pendingCountRequests.delete(key);
+    });
   pendingCountRequests.set(key, request);
   return request;
 }
